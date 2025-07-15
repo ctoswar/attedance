@@ -27,6 +27,7 @@ const AttendanceMonitorDashboard = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const pollingIntervalRef = useRef(null);
+  const recordPollingIntervalRef = useRef(null);
 
   // Initialize system status check
   useEffect(() => {
@@ -56,6 +57,50 @@ const AttendanceMonitorDashboard = () => {
       setLastError('Failed to connect to camera system');
     }
   };
+
+  // Function to fetch attendance records from the backend
+  const fetchAttendanceRecords = async () => {
+    try {
+        const response = await fetch('http://192.168.75.104:8000/records/');
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            // Update attendance records directly from the records array
+            setAttendanceRecords(data.records || []);
+            
+            // Update stats if statistics are included in the response
+            if (data.statistics) {
+                setStats({
+                    totalRecords: data.statistics.total_records || 0,
+                    highTempCount: data.statistics.high_temp_count || 0,
+                    avgBodyTemp: data.statistics.avg_body_temp || 0,
+                    avgAmbientTemp: data.statistics.avg_ambient_temp || 0
+                });
+            }
+        } else {
+            console.error('Failed to fetch records:', data.message);
+            setLastError(data.message || 'Failed to load attendance records');
+        }
+    } catch (error) {
+        console.error('Error fetching attendance records:', error);
+        setLastError('Network error while fetching records');
+    }
+};
+  // Update existing useEffect to include record fetching
+  useEffect(() => {
+    // Fetch records when component mounts
+    fetchAttendanceRecords();
+
+    // Set up periodic refresh
+    recordPollingIntervalRef.current = setInterval(fetchAttendanceRecords, 30000); // Every 30 seconds
+
+    // Cleanup interval on component unmount
+    return () => {
+      if (recordPollingIntervalRef.current) {
+        clearInterval(recordPollingIntervalRef.current);
+      }
+    };
+  }, []);
 
   const pollServer = async () => {
     try {
@@ -150,25 +195,6 @@ const AttendanceMonitorDashboard = () => {
     }
   }, [isMonitoring, settings.autoCapture, sensorStatus]);
 
-  useEffect(() => {
-    loadAttendanceRecords();
-  }, []);
-
-  const loadAttendanceRecords = async () => {
-    try {
-      const response = await fetch('http://192.168.75.104:8000/stats/');
-      const data = await response.json();
-      
-      if (data.records) {
-        setAttendanceRecords(data.records);
-        updateStats(data.records);
-      }
-    } catch (error) {
-      console.error('Error loading records:', error);
-      setLastError('Failed to load attendance records');
-    }
-  };
-
   const captureAttendance = async () => {
     try {
       const response = await fetch('http://192.168.75.104:8000/capture/', {
@@ -185,21 +211,8 @@ const AttendanceMonitorDashboard = () => {
       const data = await response.json();
       
       if (data.status === 'success') {
-        const newRecord = {
-          id: Date.now(),
-          timestamp: data.timestamp,
-          personId: data.person_id,
-          facesDetected: data.faces_detected,
-          bodyTemperature: data.body_temperature,
-          ambientTemperature: data.ambient_temperature,
-          temperatureStatus: data.temperature_status,
-          cameraType: data.camera_type,
-          sensorType: data.sensor_type
-        };
-
-        const updatedRecords = [newRecord, ...attendanceRecords];
-        setAttendanceRecords(updatedRecords);
-        updateStats(updatedRecords);
+        // Refresh records after successful capture
+        fetchAttendanceRecords();
         setLastError(null);
       } else {
         console.error('Capture failed:', data.message);
@@ -211,19 +224,25 @@ const AttendanceMonitorDashboard = () => {
     }
   };
 
-  const updateStats = (records) => {
-    const bodyTemps = records.filter(r => r.bodyTemperature !== null && r.bodyTemperature !== undefined).map(r => r.bodyTemperature);
-    const ambientTemps = records.filter(r => r.ambientTemperature !== null && r.ambientTemperature !== undefined).map(r => r.ambientTemperature);
-    const highTempCount = records.filter(r => r.temperatureStatus === 'High').length;
+  // Modify the existing updateStats function to handle potential undefined values
+ const updateStats = (records) => {
+    const bodyTemps = records
+        .filter(r => r.body_temperature !== null && r.body_temperature !== undefined)
+        .map(r => r.body_temperature);
+    
+    const ambientTemps = records
+        .filter(r => r.ambient_temperature !== null && r.ambient_temperature !== undefined)
+        .map(r => r.ambient_temperature);
+    
+    const highTempCount = records.filter(r => r.temperature_status === 'High').length;
     
     setStats({
-      totalRecords: records.length,
-      highTempCount,
-      avgBodyTemp: bodyTemps.length > 0 ? bodyTemps.reduce((a, b) => a + b, 0) / bodyTemps.length : 0,
-      avgAmbientTemp: ambientTemps.length > 0 ? ambientTemps.reduce((a, b) => a + b, 0) / ambientTemps.length : 0
+        totalRecords: records.length,
+        highTempCount,
+        avgBodyTemp: bodyTemps.length > 0 ? bodyTemps.reduce((a, b) => a + b, 0) / bodyTemps.length : 0,
+        avgAmbientTemp: ambientTemps.length > 0 ? ambientTemps.reduce((a, b) => a + b, 0) / ambientTemps.length : 0
     });
-  };
-
+};
   const toggleMonitoring = () => {
     setIsMonitoring(!isMonitoring);
     if (!isMonitoring) {
@@ -235,6 +254,7 @@ const AttendanceMonitorDashboard = () => {
     return new Date(timestamp).toLocaleString();
   };
 
+  // Modify exportData to use the current attendanceRecords
   const exportData = () => {
     const dataStr = JSON.stringify(attendanceRecords, null, 2);
     const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
@@ -405,11 +425,14 @@ const AttendanceMonitorDashboard = () => {
                     onChange={(e) => setSettings({...settings, autoCapture: e.target.checked})}
                     className="sr-only"
                   />
-                  <div className={`w-16 h-8 rounded-full cursor-pointer transition-all duration-300 ${
-                    settings.autoCapture 
-                      ? 'bg-gradient-to-r from-blue-500 to-purple-600' 
-                      : 'bg-gray-600'
-                  }`}>
+                  <div 
+                    className={`w-16 h-8 rounded-full cursor-pointer transition-all duration-300 ${
+                      settings.autoCapture 
+                        ? 'bg-gradient-to-r from-blue-500 to-purple-600' 
+                        : 'bg-gray-600'
+                    }`}
+                    onClick={() => setSettings({...settings, autoCapture: !settings.autoCapture})}
+                  >
                     <div className={`w-6 h-6 bg-white rounded-full shadow-lg transform transition-transform duration-300 mt-1 ${
                       settings.autoCapture ? 'translate-x-9' : 'translate-x-1'
                     }`}></div>
@@ -652,32 +675,32 @@ const AttendanceMonitorDashboard = () => {
               </thead>
               <tbody>
                 {attendanceRecords.slice(0, 10).map((record, index) => (
-                  <tr key={record.id} className="border-b border-white/5 hover:bg-white/5 transition-all duration-300">
+                  <tr key={record.id || index} className="border-b border-white/5 hover:bg-white/5 transition-all duration-300">
                     <td className="p-4 text-sm">{formatTime(record.timestamp)}</td>
-                    <td className="p-4 text-sm font-medium text-blue-400">{record.personId}</td>
-                    <td className="p-4 text-sm">{record.facesDetected}</td>
+                    <td className="p-4 text-sm font-medium text-blue-400">{record.person_id}</td>
+                    <td className="p-4 text-sm">{record.faces_detected}</td>
                     <td className="p-4 text-sm">
-                      {record.bodyTemperature ? `${record.bodyTemperature.toFixed(1)}°C` : '--'}
+                      {record.body_temperature ? `${record.body_temperature.toFixed(1)}°C` : '--'}
                     </td>
                     <td className="p-4 text-sm">
-                      {record.ambientTemperature ? `${record.ambientTemperature.toFixed(1)}°C` : '--'}
+                      {record.ambient_temperature ? `${record.ambient_temperature.toFixed(1)}°C` : '--'}
                     </td>
                     <td className="p-4 text-sm">
                       <span className={`px-3 py-1 rounded-full text-xs font-medium backdrop-blur-xl ${
-                        record.temperatureStatus === 'High' 
+                        record.temperature_status === 'High' 
                           ? 'bg-red-500/20 text-red-400 border border-red-500/30' 
-                          : record.temperatureStatus === 'Normal'
+                          : record.temperature_status === 'Normal'
                           ? 'bg-green-500/20 text-green-400 border border-green-500/30'
                           : 'bg-gray-500/20 text-gray-400 border border-gray-500/30'
                       }`}>
-                        {record.temperatureStatus || 'N/A'}
+                        {record.temperature_status || 'N/A'}
                       </span>
                     </td>
                     <td className="p-4 text-sm">
                       <span className={`text-xs ${
-                        record.sensorType === 'mock' ? 'text-yellow-400' : 'text-green-400'
+                        record.sensor_type === 'mock' ? 'text-yellow-400' : 'text-green-400'
                       }`}>
-                        {record.sensorType || 'N/A'}
+                        {record.sensor_type || 'N/A'}
                       </span>
                     </td>
                   </tr>
